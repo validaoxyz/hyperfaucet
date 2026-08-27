@@ -1,0 +1,173 @@
+import { ServiceManager } from "../../common/ServiceManager.js";
+import { faucetConfig } from "../../config/FaucetConfig.js";
+import { FaucetDatabase } from "../../db/FaucetDatabase.js";
+import { EthClaimManager } from "../../eth/EthClaimManager.js";
+import { EthWalletManager } from "../../eth/EthWalletManager.js";
+import { EthWalletRefill } from "../../eth/EthWalletRefill.js";
+import { IRpcEndpointStatus } from "../../eth/RpcEndpointPool.js";
+import { DynamicOutflowModule } from "../../modules/dynamic-outflow/DynamicOutflowModule.js";
+import { FaucetBalanceModule } from "../../modules/faucet-balance/FaucetBalanceModule.js";
+import { FaucetOutflowModule } from "../../modules/faucet-outflow/FaucetOutflowModule.js";
+import { ModuleManager } from "../../modules/ModuleManager.js";
+import { SessionManager } from "../../session/SessionManager.js";
+import { ISessionRewardFactor } from "../../session/SessionRewardFactor.js";
+import { getHashedIp, getHashedSessionId } from "../../utils/HashedInfo.js";
+import { getPublicClaimError } from "../PublicErrors.js";
+
+export interface IClientClaimStatus {
+  time: number;
+  session: string;
+  target: string;
+  amount: string;
+  status: string;
+  error?: string;
+  nonce: number;
+  hash: string;
+  txhex?: string;
+}
+
+export interface IClientSessionStatus {
+  id: string;
+  start: number;
+  target: string;
+  ip: string;
+  ipInfo?: any,
+  balance: string;
+  nonce: number;
+  hashrate: number;
+  status: string;
+  restr: any;
+  cliver: string;
+  boost: any;
+  connected: boolean;
+  idle: number;
+  factors: ISessionRewardFactor[];
+}
+
+export interface IClientFaucetStatus {
+  status: {
+    walletBalance: string;
+    unclaimedBalance: string;
+    queuedBalance: string;
+    balanceRestriction: number;
+  };
+  refill: {
+    balance: string;
+    trigger: string;
+    amount: string;
+    cooldown: number;
+  };
+  outflowRestriction: {
+    now: number;
+    updateTime: number;
+    balance: string;
+    balanceNumerator: string;
+    balanceDenominator: string;
+    restriction: number;
+    amount: string;
+    duration: number;
+    lowerLimit: string;
+    upperLimit: string;
+  };
+  dynamicOutflow: {
+    now: number;
+    budget: string;
+    updateTime: number;
+    rate: string;
+    restriction: number;
+    targetDrainTime: number;
+  };
+  rpcEndpoints: IRpcEndpointStatus[];
+}
+
+export interface IClientSessionsStatus {
+  sessions: IClientSessionStatus[];
+}
+
+export interface IClientQueueStatus {
+  claims: IClientClaimStatus[];
+}
+
+
+export async function buildFaucetStatus(): Promise<IClientFaucetStatus> {
+  let moduleManager = ServiceManager.GetService(ModuleManager);
+  let sessionManager = ServiceManager.GetService(SessionManager);
+  let ethClaimManager = ServiceManager.GetService(EthClaimManager);
+  let ethWalletManager = ServiceManager.GetService(EthWalletManager);
+  let ethWalletRefill = ServiceManager.GetService(EthWalletRefill);
+
+  let statusRsp: IClientFaucetStatus = {
+    status: {
+      walletBalance: ethWalletManager.getFaucetBalance()?.toString(),
+      unclaimedBalance: (await sessionManager.getUnclaimedBalance()).toString(),
+      queuedBalance: ethClaimManager.getQueuedAmount().toString(),
+      balanceRestriction: moduleManager.getModule<FaucetBalanceModule>("faucet-balance")?.getBalanceRestriction() || 100,
+    },
+    outflowRestriction: moduleManager.getModule<FaucetOutflowModule>("faucet-outflow")?.getOutflowDebugState(),
+    dynamicOutflow: moduleManager.getModule<DynamicOutflowModule>("dynamic-outflow")?.getOutflowDebugState(),
+    refill: faucetConfig.ethRefillContract && faucetConfig.ethRefillContract.contract ? {
+      balance: (await ethWalletManager.getWalletBalance(faucetConfig.ethRefillContract.contract)).toString(),
+      trigger: faucetConfig.ethRefillContract.triggerBalance.toString(),
+      amount: faucetConfig.ethRefillContract.requestAmount.toString(),
+      cooldown: ethWalletRefill.getFaucetRefillCooldown(),
+    } : null,
+    rpcEndpoints: ethWalletManager.getRpcPool()?.getStatusList() || [],
+  };
+
+  return statusRsp;
+}
+
+export async function buildSessionStatus(unmasked?: boolean): Promise<IClientSessionsStatus> {
+  let sessionsRsp: IClientSessionsStatus = {
+    sessions: null,
+  };
+
+  let sessions = await ServiceManager.GetService(FaucetDatabase).getAllSessions(86400);
+  let sessionManager = ServiceManager.GetService(SessionManager);
+  sessionsRsp.sessions = sessions.map((session) => {
+    let runningSession = sessionManager.getSession(session.sessionId);
+    return {
+      id: unmasked ? session.sessionId : getHashedSessionId(session.sessionId, faucetConfig.pseudonymKey),
+      start: session.startTime,
+      target: session.targetAddr,
+      ip: unmasked ? session.remoteIP : getHashedIp(session.remoteIP, faucetConfig.pseudonymKey),
+      ...(unmasked ? { ipInfo: session.data["ipinfo.data"] } : {}),
+      balance: session.dropAmount,
+      nonce: session.data["pow.lastNonce"],
+      hashrate: session.data["pow.hashrate"],
+      status: session.status,
+      restr: session.data["ipinfo.restriction.data"],
+      cliver: session.data["cliver"],
+      boost: session.data["passport.score"],
+      connected: runningSession ? !!runningSession.getSessionModuleRef("pow.clientActive") : null,
+      idle: session.data["pow.idleTime"],
+      factors: session.data["reward.factors"],
+    }
+  });
+
+  return sessionsRsp;
+}
+
+export function buildQueueStatus(unmasked?: boolean): IClientQueueStatus {
+  let claims = ServiceManager.GetService(EthClaimManager).getTransactionQueue();
+  let rspClaims = claims.map((claimTx) => {
+    let publicError = getPublicClaimError(claimTx.claim.claimStatus);
+    return {
+      time: claimTx.claim.claimTime,
+      session: unmasked ? claimTx.session : getHashedSessionId(claimTx.session, faucetConfig.pseudonymKey),
+      target: claimTx.target,
+      amount: claimTx.amount.toString(),
+      status: claimTx.claim.claimStatus,
+      ...(unmasked
+        ? (claimTx.claim.txError ? {error: claimTx.claim.txError} : {})
+        : (publicError ? {error: publicError} : {})),
+      nonce: claimTx.claim.txNonce || null,
+      hash: claimTx.claim.txHash || null,
+      ...(unmasked && claimTx.claim.txHex ? {txhex: claimTx.claim.txHex} : {}),
+    }
+  });
+
+  return {
+    claims: rspClaims,
+  };
+}

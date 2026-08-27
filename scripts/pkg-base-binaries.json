@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "pkgVersion": "6.22.0",
+  "pkgFetchVersion": "3.6.5",
+  "nodeVersion": "v22.23.2",
+  "binaries": [
+    {
+      "target": "node22.23.2-linux-x64",
+      "asset": "node-v22.23.2-linux-x64",
+      "url": "https://github.com/yao-pkg/pkg-fetch/releases/download/v3.6/node-v22.23.2-linux-x64",
+      "sha256": "6e3f32d02f548cc87d462441666b28fec9beac4278b0831a0929a7b49bac3886",
+      "size": 74213912,
+      "output": "bin/server-linux",
+      "mode": "0755"
+    },
+    {
+      "target": "node22.23.2-win-x64",
+      "asset": "node-v22.23.2-win-x64",
+      "url": "https://github.com/yao-pkg/pkg-fetch/releases/download/v3.6/node-v22.23.2-win-x64",
+      "sha256": "555d3dceaaf1c5628ac8fa23d1ebde46a424d2ad6782cc2412be8eed4a7a6b69",
+      "size": 57444352,
+      "output": "bin/server-win.exe",
+      "mode": "0644"
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+	"compilerOptions": {
+		// Target latest version of ECMAScript.
+		"target": "esnext",
+		// Worker entrypoints import generated declarations from the repository root.
+		"rootDir": "..",
+		// Search under node_modules for non-relative imports.
+		"moduleResolution": "bundler",
+		"strict": false,
+		"skipLibCheck": true,
+		"noUncheckedSideEffectImports": false,
+		// Process & infer types from .js files.
+		"allowJs": true,
+		// Don't emit; allow Babel to transform files.
+		"noEmit": true,
+		// Import non-ES modules as default imports.
+		"esModuleInterop": true,
+		// use typescript to transpile jsx to js
+		"jsx": "react",
+		
+		"lib": ["esnext", "dom", "dom.iterable"],
+		"module": "ESNext",
+		"removeComments": true,
+		"alwaysStrict": true,
+		"importHelpers": true
+	},
+}

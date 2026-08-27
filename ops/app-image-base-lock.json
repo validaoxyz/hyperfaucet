@@ -1,0 +1,24 @@
+{
+  "contract": "hyperfaucet/app-image-base-lock/v1",
+  "platform": "linux/amd64",
+  "openssl": {
+    "alpineVersion": "3.5.8-r0",
+    "cve": "CVE-2026-14456"
+  },
+  "node": {
+    "alpineVersion": "3.24.1",
+    "platformManifest": "sha256:76789712cd1ae89a1225eac9077010d68987a423588042dac30446f502f1858c",
+    "reference": "mirror.gcr.io/library/node:22.23.2-alpine3.24@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32",
+    "resolvedVersion": "22.23.2",
+    "source": "https://github.com/nodejs/docker-node",
+    "sourceRevision": "bc0a422bce0f729dd85790639d9f1918143f1235"
+  },
+  "nginx": {
+    "alpineVersion": "3.24.1",
+    "platformManifest": "sha256:3b569ded54fe09ab73dbdb409f403631d55c0bb231e4adc10b7c974beb0dc7be",
+    "reference": "ghcr.io/nginx/nginx-unprivileged:1.30.4-alpine-slim@sha256:bcf91d2c73ab64fa1c4ac7fbac5ac523057c8af7d553ab9251c7aef38c260979",
+    "resolvedVersion": "1.30.4",
+    "source": "https://github.com/nginx/docker-nginx-unprivileged",
+    "sourceRevision": "5523787e8d6f65e00a5088b8dc59e6bce638ddb2"
+  }
+}

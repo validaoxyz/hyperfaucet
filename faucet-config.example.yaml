@@ -1,0 +1,371 @@
+# HyperFaucet config (example)
+# PoW faucet for HyperEVM testnet — https://hyperfaucet.dev
+version: 2
+
+### General Settings
+
+# faucet database (defaults to local sqlite)
+database:
+  driver: "sqlite"
+  file: "faucet-store.db"
+
+# logfile for faucet events (comment out for no logging)
+faucetLogFile: "faucet-events.log"
+
+# path to file to write the process pid to (comment out to disable)
+faucetPidFile: "faucet-pid.txt"
+
+# faucet http/ws server port
+serverPort: 8080
+
+# Number of trusted HTTP proxy hops in front of this faucet.
+# 0 = trust the socket IP (correct when the server is exposed directly, as in the
+# quickstart). Before setting this above 0, block direct access to this port and
+# set the exact hop count. Each proxy must preserve Host and append
+# X-Forwarded-For and X-Forwarded-Proto. A reachable backend that trusts
+# forwarded headers lets clients spoof their IP and bypass per-IP limits.
+httpProxyCount: 0
+
+# title of the faucet
+faucetTitle: "HyperFaucet"
+
+# donation/refill address shown on the info page (kept separate from the hot
+# faucet wallet, so a PoW bypass or drain cannot touch donated funds)
+faucetDonationAddress: "0xc15e03058c1459431494ef34caee43cCc0E597E9"
+
+# some additional html to show on the startpage
+faucetHomeHtml: |
+  <div class='pow-info'>
+    <h5>About</h5>
+    A proof-of-work faucet for the HyperEVM testnet (chain <span class='mono'>998</span>).
+    Mining in your browser rate-limits requests, so there is testnet HYPE left
+    for everyone.
+  </div>
+  <div class='pow-info'>
+    <h5>How it works</h5>
+    Enter your address and start mining. Stop whenever you want and claim what
+    you mined. Wallets staking HYPE with any validator earn a hash rate boost:
+    2x from 100 HYPE staked, 3x from 500 HYPE.
+  </div>
+
+# Random master secret for server-issued authentication tokens. Generate one
+# with `openssl rand -hex 32`, and do not share or reuse it.
+# Can be overridden at runtime with FAUCET_SECRET.
+faucetSecret: "REPLACE_WITH_32_BYTE_RANDOM_SECRET"
+
+# Separate key for public pseudonymous session and IP identifiers. Generate it
+# with `openssl rand -hex 32`. Do not reuse faucetSecret and keep it stable.
+# Can be overridden with FAUCET_PSEUDONYM_KEY.
+pseudonymKey: "REPLACE_WITH_DIFFERENT_32_BYTE_RANDOM_SECRET"
+
+# Optional bearer token for unmasked operator status. Use at least 32 random
+# bytes, distinct from both keys above. Leave null to disable unmasked status.
+# Can be overridden with FAUCET_STATUS_ADMIN_TOKEN.
+statusAdminToken: null
+
+# HyperEVM testnet execution RPC host(s)
+# run your own node for production use; the public endpoint is rate-limited
+ethRpcHost: "https://rpc.hyperliquid-testnet.xyz/evm"
+
+# Mark RPC endpoints offline if their block height falls behind the highest known head by more than this many blocks.
+ethRpcMaxBlockHeightDiff: 30
+
+# Monitoring poll interval (seconds) for non-metered endpoints (block height + availability).
+ethRpcMonitorInterval: 10
+
+# Monitoring poll interval (seconds) for metered endpoints (lower request count, slower failure detection).
+ethRpcMonitorMeteredInterval: 60
+
+# Number of highest-priority ready endpoints to broadcast each transaction to in parallel.
+ethTxBroadcastCount: 1
+
+# faucet wallet private key (hex, without 0x prefix)
+# can be overridden at runtime with FAUCET_ETH_WALLET_KEY
+ethWalletKey: "feedbeef12340000feedbeef12340000feedbeef12340000feedbeef12340000"
+
+# EVM chain id (HyperEVM testnet)
+ethChainId: 998
+
+# symbol (short name) of the coin that can be mined
+faucetCoinSymbol: "HYPE"
+
+# type of coin that can be mined
+faucetCoinType: "native"
+
+# transaction gas limit
+# use 21000 to prevent transactions to contracts
+ethTxGasLimit: 21000
+
+# use legacy (non-eip1559) transaction type
+ethLegacyTx: false
+
+# max transaction gas fee (in wei)
+ethTxMaxFee: 100000000000  # 100 gwei
+
+# max transaction priority fee (in wei)
+ethTxPrioFee: 1000000000  # 1 gwei
+
+# max number of unconfirmed transactions to create simultaneously
+ethMaxPending: 12
+
+# queue transactions and wait for funding when faucet is out of funds (show "No Funds" error when false)
+ethQueueNoFunds: false
+
+# link to transaction explorer with {txid} as placeholder for transaction id or null for no link
+ethTxExplorerLink: "https://app.hyperliquid-testnet.xyz/explorer/tx/{txid}"
+
+# min/max drop amount (max is the default if no module lowers it)
+maxDropAmount: 5000000000000000000 # 5 HYPE
+minDropAmount: 50000000000000000  # 0.05 HYPE
+
+# maximum session time (from start till payout)
+sessionTimeout: 43200  # 12h
+
+# session cleanup time
+sessionCleanup: 2592000 # 30 days
+
+# session save time
+sessionSaveTime: 120
+
+
+### Protection mechanisms
+modules:
+
+  ## Captcha Protection
+  captcha:
+    enabled: false
+
+    # captcha provider (turnstile recommended)
+    provider: "turnstile"
+
+    # captcha site key
+    # (Cloudflare Turnstile test keys for local dev: siteKey 3x00000000000000000000FF forces
+    # an interactive challenge and always passes with secret 1x0000000000000000000000000000000AA)
+    siteKey: "00000000-0000-0000-0000-000000000000"
+
+    # captcha secret key
+    # can be overridden at runtime with FAUCET_CAPTCHA_SECRET
+    secret: "CensoredTurnstileSecretKey"
+
+    # Optional exact hostname allowlist for Turnstile verification. Leave empty
+    # only when the Turnstile widget already has a strict hostname policy.
+    allowedHostnames:
+      - "hyperfaucet.dev"
+
+    # require captcha to start a new session
+    checkSessionStart: true
+
+    # require captcha to start claim payout
+    checkBalanceClaim: false
+
+  ## IP-Info module
+  ipinfo:
+    enabled: true
+
+    # HTTPS IP info lookup API URL. The anonymous endpoint is limited, so add
+    # an ipapi.is API key for production traffic.
+    apiUrl: "https://api.ipapi.is/?q={ip}"
+
+    # ip info caching time
+    cacheTime: 86400 # 1 day
+
+    # require valid ip info (throw error if lookup failed)
+    required: false
+
+    # ip info based restrictions
+    restrictions:
+      # percentage of drop amount if IP is in a hosting range
+      hosting: 10
+
+      # percentage of drop amount if IP is in a proxy range
+      proxy: 10
+
+    # ip info pattern based restrictions
+    restrictionsPattern: {}
+
+  ethinfo:
+    enabled: true
+
+    requestTimeout: 10000 # caller timeout in milliseconds; integer from 1 through 120000
+    maxConcurrentLookups: 8 # physical lookups; integer from 1 through 64
+
+    # check balance and deny session if balance exceeds the limit (in wei)
+    maxBalance: 500000000000000000000 # 500 testnet HYPE
+
+    # deny sessions for contract addresses
+    denyContract: true
+
+  ## Faucet Balance module (near-empty safety net; the drain governor below does the day-to-day scaling)
+  faucet-balance:
+    enabled: true
+
+    # reward restriction based on faucet wallet balance. lowest value applies
+    fixedRestriction:
+      "20000000000000000000": 50 # 50% if lower than 20 HYPE
+      "5000000000000000000": 10  # 10% if lower than 5 HYPE
+
+  ## Dynamic Outflow module (drain governor)
+  # continuously retargets the global reward rate to effectiveBalance / targetDrainTime,
+  # so sustained mining follows the remaining effective balance toward the reserve instead of
+  # cliffing. At 400 HYPE with a 1 HYPE reserve, the example target is about 1 HYPE per 15m.
+  dynamic-outflow:
+    enabled: true
+
+    # effective balance / targetDrainTime is the aggregate reward rate in wei per second
+    targetDrainTime: 359100 # 4 days 3 hours 45 minutes; ~1 HYPE per 15m at 400 HYPE with a 1 HYPE reserve
+
+    # how often the rate is recomputed from the wallet balance
+    refreshInterval: 60
+
+    # seconds worth of unused budget that may accumulate as burst buffer
+    burstWindow: 900 # 15m
+
+    # seconds worth of overdraft at which rewards reach 0%
+    cutoffWindow: 900 # 15m
+
+  ## Hyperliquid Stake module (mainnet-stake reward boost)
+  # queries the wallet's staked (delegated) HYPE on Hyperliquid MAINNET and applies a
+  # reward multiplier based on delegated mainnet HYPE
+  hyperliquid-stake:
+    enabled: true
+
+    # hyperliquid info API (mainnet — staking with real value lives there)
+    infoApiUrl: "https://api.hyperliquid.xyz/info"
+
+    # reward factor by staked HYPE (highest matching tier applies; tiers are
+    # HYPE-denominated because fixedTokenPrice is 1)
+    boostFactor:
+      100: 2 # 2x reward from 100 HYPE staked
+      500: 3 # 3x reward from 500 HYPE staked
+
+    # only count stake delegated to these validators (empty = all validators)
+    validatorFilter: []
+
+    # fixed price of 1 keeps the tiers denominated in HYPE itself
+    fixedTokenPrice: 1
+
+    # seconds to cache the live HYPE price
+    priceCacheTime: 300
+
+    # seconds to cache a wallet's stake lookup
+    stakeCacheTime: 600
+
+    # min seconds between manual stake refreshes per session
+    refreshCooldown: 300
+
+    # deny sessions below this comparison value (0 = no requirement). With
+    # fixedTokenPrice 1, the value equals the amount of delegated HYPE.
+    # the gate fails closed: when the info API is unreachable, gated faucets deny
+    # session starts regardless of failOnApiError
+    requiredStakeUsd: 0
+
+    # false: continue without boost when the info API is unreachable (boost only;
+    # a requiredStakeUsd gate always fails closed)
+    failOnApiError: false
+
+    # info API request timeout in ms
+    requestTimeout: 10000
+
+    # max live guest and session-start lookups per IP per minute (0 = unlimited)
+    guestLookupRateLimit: 6
+
+    # max distinct stake lookups in flight, integer from 1 through 64
+    maxConcurrentLookups: 8
+
+  ## Recurring Limits module
+  recurring-limits:
+    enabled: true
+
+    limits: # array of individual limits, which all need to be passed
+      - limitCount: 6
+        limitAmount: 10000000000000000000 # 10 HYPE per day per IP+address
+        duration: 86400
+      - limitCount: 10
+        limitAmount: 15000000000000000000 # 15 HYPE per 2 days by address
+        duration: 172800
+        byAddrOnly: true
+
+  ## Concurrency Limit module
+  concurrency-limit:
+    enabled: true
+
+    concurrencyLimit: 1 # only allow 1 concurrent session per ip / target addr
+    byAddrOnly: false
+    byIPOnly: false
+
+  ## Proof of Work (mining) protection
+  pow:
+    enabled: true
+
+    # reward amount per eligible hash (in wei)
+    powShareReward: 2000000000000000 # 0.002 HYPE
+
+    # penalty for not responding to a verification request (percent of powShareReward)
+    verifyMinerMissPenaltyPerc: 10
+
+    # reward for responding to a verification request in time (percent of powShareReward)
+    verifyMinerRewardPerc: 15
+
+    # maximum mining session time (in seconds)
+    powSessionTimeout: 18000 # 5h
+
+    # maximum number of seconds a session can idle until it gets closed
+    powIdleTimeout: 30 # closed tab/lost connection frees the per-IP slot in ~30s; a quick refresh still resumes
+
+    # maximum allowed mining hashrate (will be throttled to this rate when faster)
+    powHashrateSoftLimit: 1000
+    powHashrateHardLimit: 1100
+
+    # number of 0-bits the hash needs to start with to be eligible for a reward
+    powDifficulty: 11
+
+    # mining algorithm to use
+    powHashAlgo: "argon2"
+
+    # every rewarded share is validated locally. These limits bound server CPU
+    # and prevent one session from monopolizing the validator.
+    verifyLocalMaxQueue: 100 # queued plus in-flight validations; integer >= 1
+    verifyLocalMaxPendingPerSession: 4 # integer >= 1 and less than the total queue
+    verifyLocalMaxSessionDutyCyclePercent: 25 # integer from 1 through 50
+    verifyLocalTimeout: 30 # seconds from admission through validation; finite and > 0
+
+
+### Fund Management
+
+# minimum balance to keep in the faucet wallet (in wei)
+spareFundsAmount: 1000000000000000000  # 1 HYPE
+
+# minimum balance to show the empty faucet error message
+noFundsBalance: 2000000000000000000  # 2 HYPE
+
+# minimum balance to show the low funds warning
+lowFundsBalance: 50000000000000000000  # 50 HYPE
+
+# low faucet balance warning message / false to disable the warning
+lowFundsWarning: "The faucet is running low. Balance: {1}"
+
+# empty faucet error message / false to disable the error
+noFundsError: "The faucet is empty. Wait for it to be refilled and try again"
+
+# RPC unreachable error message / true to show the generic message / false to disable the error
+rpcConnectionError: "The faucet is temporarily unavailable (RPC error)"
+
+
+### Advanced WebServer config
+
+# allow external sites embedding this faucet
+corsAllowOrigin: []
+
+### Other Settings
+
+# faucet stats config (comment out to disable stats)
+faucetStats:
+  # faucet stats file
+  logfile: "faucet-stats.log"
+
+# build SEO optimized index.seo.html and deliver as index page
+buildSeoIndex: true
+
+# some additional meta tags to add to the SEO optimized page
+buildSeoMeta:
+  keywords: "hyperliquid,hyperevm,testnet,faucet,hype,testnet hype,pow faucet,hyperfaucet"

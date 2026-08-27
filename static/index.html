@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en" class="powfaucet">
+  <head>
+    <title>hyperfaucet.dev</title>
+    <!-- pow-faucet-header -->
+    <meta charset='utf-8'>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Proof-of-work faucet for the HyperEVM testnet. Mine testnet HYPE in your browser.">
+    <style id="faucet-boot-style">
+      html.faucet-booting,
+      html.faucet-booting body { background: var(--ground, #1c2f7e); }
+      html.faucet-booting .faucet-bootstrap {
+        visibility: hidden;
+        pointer-events: none;
+      }
+      html.faucet-booting body::before,
+      html.faucet-booting body::after { display: none; }
+    </style>
+    <script>document.documentElement.classList.add("faucet-booting");</script>
+    <link rel="preload" href="/fonts/IBMPlexSans-Variable.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="/fonts/YoungSerif-Regular.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="Stylesheet" type="text/css" href="/css/fonts.css">
+    <link rel="Stylesheet" type="text/css" href="/css/powfaucet.css">
+    <style>html, body { margin: 0; padding: 0; height: 100%; }</style>
+    <script src="/js/appearance-boot.js"></script>
+    <link href="/site.webmanifest" rel="manifest">
+    <link href="/favicon/apple-touch-icon.png" rel="apple-touch-icon">
+    <link href="/favicon/favicon-32x32.png" rel="icon" sizes="32x32">
+    <link href="/favicon/favicon-16x16.png" rel="icon" sizes="16x16">
+  </head>
+  <body>
+    <noscript>JavaScript is required to use this faucet.</noscript>
+    <div class="faucet-wrapper">
+      <div class="faucet-container faucet-bootstrap">
+        <div class="pow-faucet" data-powfaucet="default">
+        </div>
+      </div>
+    </div>
+    <script src="/js/powfaucet.js"></script>
+  </body>
+</html>

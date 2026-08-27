@@ -1,0 +1,126 @@
+name: hyperfaucet
+
+x-runtime-security: &runtime-security
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp:size=64m,mode=1777,noexec,nosuid,nodev
+
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: ${CONTAINER_LOG_MAX_SIZE:-20m}
+    max-file: ${CONTAINER_LOG_MAX_FILES:-5}
+
+services:
+  app:
+    image: ${HYPERFAUCET_IMAGE_REFERENCE:?set an immutable HyperFaucet image reference}
+    pull_policy: never
+    <<: *runtime-security
+    user: nginx
+    entrypoint:
+      - /entrypoint.sh
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 90s
+    logging: *default-logging
+    environment:
+      FAUCET_ROLE: app
+      FAUCET_SERVER_PORT: "8082"
+      # The independent Caddy edge is the one trusted HTTP hop.
+      FAUCET_HTTP_PROXY_OFFSET: "1"
+    command:
+      - --config=/run/hyperfaucet/faucet-config.yaml
+      - --datadir=/data
+    volumes:
+      - type: bind
+        source: ${HYPERFAUCET_RUNTIME_ROOT:?set HYPERFAUCET_RUNTIME_ROOT}/config/faucet-config.yaml
+        target: /run/hyperfaucet/faucet-config.yaml
+        read_only: true
+      - type: bind
+        source: ${HYPERFAUCET_RUNTIME_ROOT:?set HYPERFAUCET_RUNTIME_ROOT}/state
+        target: /data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8082/api/getVersion').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 45s
+    networks:
+      - internal
+      - egress
+
+  caddy:
+    image: ${HYPERFAUCET_CADDY_IMAGE_REFERENCE:?set an immutable patched Caddy image reference}
+    pull_policy: never
+    <<: *runtime-security
+    # The pinned scratch image's /etc directories are non-searchable. Grant
+    # only read/search bypass; the container still drops every other cap.
+    cap_add:
+      - DAC_READ_SEARCH
+    user: "0:0"
+    entrypoint:
+      - /usr/bin/caddy
+    command:
+      - run
+      - --config
+      - /etc/caddy/Caddyfile
+      - --adapter
+      - caddyfile
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging: *default-logging
+    environment:
+      HYPERFAUCET_HOST: ${HYPERFAUCET_HOST:?set HYPERFAUCET_HOST}
+      XDG_CONFIG_HOME: /tmp/caddy-config
+      XDG_DATA_HOME: /tmp/caddy-data
+    secrets:
+      - caddy_basic_auth
+      - cloudflare_aop_ca
+      - cloudflare_origin_cert
+      - cloudflare_origin_key
+    volumes:
+      - type: bind
+        source: ./Caddyfile
+        target: /etc/caddy/Caddyfile
+        read_only: true
+    ports:
+      - target: 443
+        published: "443"
+        host_ip: 0.0.0.0
+        protocol: tcp
+    depends_on:
+      app:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "caddy", "validate", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+      interval: 30s
+      timeout: 5s
+      retries: 4
+      start_period: 10s
+    networks:
+      - internal
+      - ingress
+
+secrets:
+  caddy_basic_auth:
+    file: ${HYPERFAUCET_SECRETS_DIR:?set HYPERFAUCET_SECRETS_DIR}/caddy_basic_auth
+  cloudflare_aop_ca:
+    file: ${HYPERFAUCET_SECRETS_DIR:?set HYPERFAUCET_SECRETS_DIR}/cloudflare_aop_ca
+  cloudflare_origin_cert:
+    file: ${HYPERFAUCET_SECRETS_DIR:?set HYPERFAUCET_SECRETS_DIR}/cloudflare_origin_cert
+  cloudflare_origin_key:
+    file: ${HYPERFAUCET_SECRETS_DIR:?set HYPERFAUCET_SECRETS_DIR}/cloudflare_origin_key
+
+networks:
+  internal:
+    name: hyperfaucet_internal_v1
+    internal: true
+  egress:
+    name: hyperfaucet_egress_v1
+  ingress:
+    name: hyperfaucet_ingress_v1
