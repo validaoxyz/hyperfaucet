@@ -5,18 +5,23 @@ import { awaitSleepPromise, bindTestStubs, unbindTestStubs, loadDefaultTestConfi
 import { FetchUtil } from '../../src/utils/FetchUtil.js';
 import { ServiceManager } from '../../src/common/ServiceManager.js';
 import { FaucetDatabase } from '../../src/db/FaucetDatabase.js';
-import { ModuleManager } from '../../src/modules/ModuleManager.js';
+import { ModuleHookAction, ModuleManager } from '../../src/modules/ModuleManager.js';
 import { SessionManager } from '../../src/session/SessionManager.js';
+import { FaucetSession } from '../../src/session/FaucetSession.js';
 import { faucetConfig } from '../../src/config/FaucetConfig.js';
 import { FaucetWebApi } from '../../src/webserv/FaucetWebApi.js';
 import { IHyperliquidStakeConfig } from '../../src/modules/hyperliquid-stake/HyperliquidStakeConfig.js';
 import { HyperliquidStakeModule } from '../../src/modules/hyperliquid-stake/HyperliquidStakeModule.js';
 import { PublicFaucetError } from '../../src/common/FaucetError.js';
 import { ISessionRewardFactor } from '../../src/session/SessionRewardFactor.js';
+import { eth } from 'web3';
 
 
 describe("Faucet module: hyperliquid-stake", () => {
   let globalStubs;
+  const ownershipAccount = eth.accounts.privateKeyToAccount(
+    "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  );
 
   beforeEach(async () => {
     globalStubs = bindTestStubs({
@@ -93,6 +98,41 @@ describe("Faucet module: hyperliquid-stake", () => {
     return testSession;
   }
 
+  function keepNextSessionRunning(): void {
+    ServiceManager.GetService(ModuleManager).addActionHook(
+      null,
+      ModuleHookAction.SessionStart,
+      100,
+      "stake-ownership-test-hold",
+      (session: FaucetSession) => session.addBlockingTask("test", "stake-ownership", 60),
+    );
+  }
+
+  async function verifySessionOwnership(
+    module: HyperliquidStakeModule,
+    session: FaucetSession,
+    account = ownershipAccount,
+  ): Promise<any> {
+    const req = {method: "POST"};
+    const challenge = await (module as any).processGetStakeChallenge(
+      req,
+      {query: {}},
+      Buffer.from(JSON.stringify({session: session.getSessionId()})),
+    );
+    expect(challenge.challengeId).to.match(/^[0-9a-f]{64}$/);
+    expect(challenge.address).to.equal(session.getTargetAddr());
+    const signature = account.sign(challenge.message).signature;
+    return (module as any).processVerifyStakeOwnership(
+      req,
+      {query: {}},
+      Buffer.from(JSON.stringify({
+        session: session.getSessionId(),
+        challengeId: challenge.challengeId,
+        signature,
+      })),
+    );
+  }
+
   it("Check client config exports", async () => {
     faucetConfig.modules["hyperliquid-stake"] = moduleConfig({refreshCooldown: 42, requiredStakeUsd: 5});
     await ServiceManager.GetService(ModuleManager).initialize();
@@ -126,15 +166,31 @@ describe("Faucet module: hyperliquid-stake", () => {
     expect(error?.message).to.include("must not contain credentials");
   });
 
-  it("Apply 2x boost at the first stake tier", async () => {
+  it("Withhold a 2x boost until the recipient proves wallet ownership", async () => {
     faucetConfig.modules["hyperliquid-stake"] = moduleConfig();
     stubInfoApi({delegated: "500", price: "40.0"}); // 20,000 USD staked
     await ServiceManager.GetService(ModuleManager).initialize();
-    let testSession = await runTestSession();
+    keepNextSessionRunning();
+    let testSession = await runTestSession(ownershipAccount.address, "running");
+    let module = ServiceManager.GetService(ModuleManager).getModule<HyperliquidStakeModule>("hyperliquid-stake");
+    let rewardFactors: ISessionRewardFactor[] = [];
+    (module as any).processSessionRewardFactor(testSession, rewardFactors);
+    expect(rewardFactors).to.deep.equal([], "unverified recipient received a stake boost");
+
+    const verification = await verifySessionOwnership(module, testSession);
+    expect(verification.verified).to.equal(true, "wallet ownership was not verified");
+    expect(verification.boost?.factor).to.equal(2, "verified stake tier was not returned");
     let stakeInfo = testSession.getSessionData("hlstake.data");
     expect(stakeInfo?.delegated).to.equal(500, "unexpected delegated amount");
     expect(stakeInfo?.stakedUsd).to.equal(20000, "unexpected staked usd value");
-    expect(testSession.getDropAmount()).to.equal(200n, "boost factor 2 not applied to drop amount");
+    rewardFactors = [];
+    (module as any).processSessionRewardFactor(testSession, rewardFactors);
+    expect(rewardFactors).to.deep.equal([{factor: 2, module: "hyperliquid-stake"}], "verified stake boost was not applied");
+    const sessionResponse = await (module as any).processGetStakeInfo(
+      {method: "GET"},
+      {query: {session: testSession.getSessionId()}},
+    );
+    expect(sessionResponse.cooldown).to.be.greaterThan(Math.floor(Date.now() / 1000), "session response omitted the refresh cooldown");
     for(let call of globalStubs["fetch"].getCalls()) {
       expect(call.args[0]).to.equal("https://unit-test.local/info");
       expect(call.args[1].redirect).to.equal("error");
@@ -143,12 +199,138 @@ describe("Faucet module: hyperliquid-stake", () => {
     }
   }).timeout(5000);
 
-  it("Apply 3x boost at the second stake tier boundary", async () => {
+  it("Apply 3x only after ownership proof at the second stake tier boundary", async () => {
     faucetConfig.modules["hyperliquid-stake"] = moduleConfig();
     stubInfoApi({delegated: "1250", price: "40.0"}); // exactly 50,000 USD staked
     await ServiceManager.GetService(ModuleManager).initialize();
-    let testSession = await runTestSession();
-    expect(testSession.getDropAmount()).to.equal(300n, "boost factor 3 not applied to drop amount");
+    keepNextSessionRunning();
+    let testSession = await runTestSession(ownershipAccount.address, "running");
+    let module = ServiceManager.GetService(ModuleManager).getModule<HyperliquidStakeModule>("hyperliquid-stake");
+    const verification = await verifySessionOwnership(module, testSession);
+    expect(verification.boost?.factor).to.equal(3, "verified 3x tier was not applied");
+  }).timeout(5000);
+
+  it("Consume a challenge when the signer does not own the recipient", async () => {
+    faucetConfig.modules["hyperliquid-stake"] = moduleConfig({fixedTokenPrice: 40});
+    stubInfoApi({delegated: "500"});
+    await ServiceManager.GetService(ModuleManager).initialize();
+    keepNextSessionRunning();
+    const session = await runTestSession(ownershipAccount.address, "running");
+    const module = ServiceManager.GetService(ModuleManager).getModule<HyperliquidStakeModule>("hyperliquid-stake");
+    const challenge = await (module as any).processGetStakeChallenge(
+      {method: "POST"},
+      {query: {}},
+      Buffer.from(JSON.stringify({session: session.getSessionId()})),
+    );
+    const otherAccount = eth.accounts.privateKeyToAccount(
+      "0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+    );
+    const requestBody = Buffer.from(JSON.stringify({
+      session: session.getSessionId(),
+      challengeId: challenge.challengeId,
+      signature: otherAccount.sign(challenge.message).signature,
+    }));
+    const mismatch = await (module as any).processVerifyStakeOwnership({method: "POST"}, {query: {}}, requestBody);
+    expect(mismatch.code).to.equal("SIGNER_MISMATCH", "wrong signer was accepted");
+    const replay = await (module as any).processVerifyStakeOwnership({method: "POST"}, {query: {}}, requestBody);
+    expect(replay.code).to.equal("CHALLENGE_NOT_FOUND", "failed signature did not consume the challenge");
+    expect(session.getSessionData("hlstake.ownership", null)).to.equal(null, "wrong signer created an ownership marker");
+  }).timeout(5000);
+
+  it("Reject an expired ownership challenge at the exact boundary", async () => {
+    const clock = sinon.useFakeTimers({now: Date.UTC(2026, 7, 27), toFake: ["Date"]});
+    try {
+      faucetConfig.modules["hyperliquid-stake"] = moduleConfig({fixedTokenPrice: 40});
+      stubInfoApi({delegated: "500"});
+      await ServiceManager.GetService(ModuleManager).initialize();
+      keepNextSessionRunning();
+      const session = await runTestSession(ownershipAccount.address, "running");
+      const module = ServiceManager.GetService(ModuleManager).getModule<HyperliquidStakeModule>("hyperliquid-stake");
+      const challenge = await (module as any).processGetStakeChallenge(
+        {method: "POST"},
+        {query: {}},
+        Buffer.from(JSON.stringify({session: session.getSessionId()})),
+      );
+      clock.tick(300_000);
+      const response = await (module as any).processVerifyStakeOwnership(
+        {method: "POST"},
+        {query: {}},
+        Buffer.from(JSON.stringify({
+          session: session.getSessionId(),
+          challengeId: challenge.challengeId,
+          signature: ownershipAccount.sign(challenge.message).signature,
+        })),
+      );
+      expect(response.code).to.equal("CHALLENGE_EXPIRED", "challenge remained valid at its expiry boundary");
+      expect(session.getSessionData("hlstake.ownership", null)).to.equal(null, "expired challenge created an ownership marker");
+    } finally {
+      clock.restore();
+    }
+  }).timeout(5000);
+
+  it("Keep the latest challenge valid when a stale challenge is submitted", async () => {
+    faucetConfig.modules["hyperliquid-stake"] = moduleConfig({fixedTokenPrice: 40});
+    stubInfoApi({delegated: "500"});
+    await ServiceManager.GetService(ModuleManager).initialize();
+    keepNextSessionRunning();
+    const session = await runTestSession(ownershipAccount.address, "running");
+    const module = ServiceManager.GetService(ModuleManager).getModule<HyperliquidStakeModule>("hyperliquid-stake");
+    const issue = () => (module as any).processGetStakeChallenge(
+      {method: "POST"},
+      {query: {}},
+      Buffer.from(JSON.stringify({session: session.getSessionId()})),
+    );
+    const first = await issue();
+    const second = await issue();
+    expect(second.challengeId).to.not.equal(first.challengeId, "challenge reissue reused a nonce");
+
+    const verify = (challenge: any) => (module as any).processVerifyStakeOwnership(
+      {method: "POST"},
+      {query: {}},
+      Buffer.from(JSON.stringify({
+        session: session.getSessionId(),
+        challengeId: challenge.challengeId,
+        signature: ownershipAccount.sign(challenge.message).signature,
+      })),
+    );
+    expect((await verify(first)).code).to.equal("CHALLENGE_NOT_FOUND", "stale challenge was accepted");
+    expect((await verify(second)).verified).to.equal(true, "stale attempt consumed the current challenge");
+  }).timeout(5000);
+
+  it("Leave the reward gate closed when ownership persistence fails", async () => {
+    faucetConfig.modules["hyperliquid-stake"] = moduleConfig({fixedTokenPrice: 40});
+    stubInfoApi({delegated: "500"});
+    await ServiceManager.GetService(ModuleManager).initialize();
+    keepNextSessionRunning();
+    const session = await runTestSession(ownershipAccount.address, "running");
+    const module = ServiceManager.GetService(ModuleManager).getModule<HyperliquidStakeModule>("hyperliquid-stake");
+    const saveStub = sinon.stub(session, "saveSession").rejects(new Error("test persistence failure"));
+    try {
+      const response = await verifySessionOwnership(module, session);
+      expect(response.code).to.equal("OWNERSHIP_SAVE_FAILED", "persistence failure was reported as success");
+      const rewardFactors: ISessionRewardFactor[] = [];
+      (module as any).processSessionRewardFactor(session, rewardFactors);
+      expect(rewardFactors).to.deep.equal([], "pending ownership marker opened the reward gate");
+    } finally {
+      saveStub.restore();
+    }
+  }).timeout(5000);
+
+  it("Require POST and bound ownership request bodies", async () => {
+    faucetConfig.modules["hyperliquid-stake"] = moduleConfig();
+    await ServiceManager.GetService(ModuleManager).initialize();
+    const api = ServiceManager.GetService(FaucetWebApi);
+    expect(api.getApiRequestBodyLimit("/api/getStakeChallenge")).to.equal(2048);
+    expect(api.getApiRequestBodyLimit("/api/verifyStakeOwnership")).to.equal(2048);
+    const module = ServiceManager.GetService(ModuleManager).getModule<HyperliquidStakeModule>("hyperliquid-stake");
+    const response = await (module as any).processGetStakeChallenge({method: "GET"}, {query: {}}, Buffer.alloc(0));
+    expect(response.code).to.equal(405, "challenge endpoint accepted GET");
+    const malformed = await (module as any).processVerifyStakeOwnership(
+      {method: "POST"},
+      {query: {}},
+      Buffer.from("not-json"),
+    );
+    expect(malformed.code).to.equal("INVALID_REQUEST", "malformed verification body was accepted");
   }).timeout(5000);
 
   it("Stop applying a stake boost after its snapshot expires", async () => {
@@ -159,9 +341,17 @@ describe("Faucet module: hyperliquid-stake", () => {
       await ServiceManager.GetService(ModuleManager).initialize();
 
       let module = ServiceManager.GetService(ModuleManager).getModule<HyperliquidStakeModule>("hyperliquid-stake");
-      let stakeInfo = await module.getStakeResolver().getStakeInfo("0x0000000000000000000000000000000000001337");
+      const targetAddr = "0x0000000000000000000000000000000000001337";
+      let stakeInfo = await module.getStakeResolver().getStakeInfo(targetAddr);
       let session = {
-        getSessionData: (key: string, fallback?: unknown) => key === "hlstake.data" ? stakeInfo : fallback,
+        getTargetAddr: () => targetAddr,
+        getSessionData: (key: string, fallback?: unknown) => {
+          if(key === "hlstake.data")
+            return stakeInfo;
+          if(key === "hlstake.ownership")
+            return {state: "active", challengeId: "test", address: targetAddr, verifiedAt: 1};
+          return fallback;
+        },
       };
       let rewardFactors: ISessionRewardFactor[] = [];
       (module as any).processSessionRewardFactor(session, rewardFactors);
@@ -176,12 +366,15 @@ describe("Faucet module: hyperliquid-stake", () => {
     }
   }).timeout(5000);
 
-  it("Apply no boost below the first tier", async () => {
+  it("Apply no boost after verification below the first tier", async () => {
     faucetConfig.modules["hyperliquid-stake"] = moduleConfig();
     stubInfoApi({delegated: "249", price: "40.0"}); // 9,960 USD staked
     await ServiceManager.GetService(ModuleManager).initialize();
-    let testSession = await runTestSession();
-    expect(testSession.getDropAmount()).to.equal(100n, "unexpected boost below first tier");
+    keepNextSessionRunning();
+    let testSession = await runTestSession(ownershipAccount.address, "running");
+    const module = ServiceManager.GetService(ModuleManager).getModule<HyperliquidStakeModule>("hyperliquid-stake");
+    const verification = await verifySessionOwnership(module, testSession);
+    expect(verification.boost?.factor).to.equal(1, "unexpected boost below first tier");
   }).timeout(5000);
 
   it("Count only filtered validators when validatorFilter is set", async () => {
@@ -197,35 +390,34 @@ describe("Faucet module: hyperliquid-stake", () => {
       ],
     });
     await ServiceManager.GetService(ModuleManager).initialize();
-    let testSession = await runTestSession();
+    keepNextSessionRunning();
+    let testSession = await runTestSession(ownershipAccount.address, "running");
+    const module = ServiceManager.GetService(ModuleManager).getModule<HyperliquidStakeModule>("hyperliquid-stake");
+    const verification = await verifySessionOwnership(module, testSession);
     let stakeInfo = testSession.getSessionData("hlstake.data");
     expect(stakeInfo?.delegated).to.equal(300, "validator filter not applied");
     expect(stakeInfo?.totalDelegated).to.equal(1000, "unexpected total delegated amount");
-    expect(testSession.getDropAmount()).to.equal(200n, "unexpected boost with validator filter");
+    expect(verification.boost?.factor).to.equal(2, "unexpected boost with validator filter");
   }).timeout(5000);
 
-  it("Continue without boost on api error (fail-open)", async () => {
+  it("Do not call the stake api before optional boost ownership is proven", async () => {
     faucetConfig.modules["hyperliquid-stake"] = moduleConfig();
     globalStubs["fetch"].returns(returnDelayedPromise(false, "test api error"));
     await ServiceManager.GetService(ModuleManager).initialize();
     let testSession = await runTestSession();
     let stakeInfo = testSession.getSessionData("hlstake.data");
-    expect(!!stakeInfo?.error).to.equal(true, "no error marker in stake info");
+    expect(stakeInfo).to.equal(null, "optional stake data was populated before ownership proof");
+    expect(globalStubs["fetch"].callCount).to.equal(0, "unverified session reached the stake api");
     expect(testSession.getDropAmount()).to.equal(100n, "unexpected boost on api error");
   }).timeout(5000);
 
-  it("Deny session on api error when failOnApiError is set", async () => {
+  it("Keep optional mining available when failOnApiError is set", async () => {
     faucetConfig.modules["hyperliquid-stake"] = moduleConfig({failOnApiError: true});
     globalStubs["fetch"].returns(returnDelayedPromise(false, "test api error"));
     await ServiceManager.GetService(ModuleManager).initialize();
-    let error;
-    try {
-      await runTestSession();
-    } catch(ex) {
-      error = ex;
-    }
-    expect(!!error).to.equal(true, "no error thrown");
-    expect(error.getCode()).to.equal("STAKE_CHECK_FAILED", "unexpected error code");
+    const session = await runTestSession();
+    expect(session.getDropAmount()).to.equal(100n, "optional api policy blocked 1x mining");
+    expect(globalStubs["fetch"].callCount).to.equal(0, "optional session reached the stake api");
   }).timeout(5000);
 
   it("Deny session below required stake", async () => {
@@ -248,7 +440,7 @@ describe("Faucet module: hyperliquid-stake", () => {
   }).timeout(5000);
 
   it("Cache the token price between sessions", async () => {
-    faucetConfig.modules["hyperliquid-stake"] = moduleConfig();
+    faucetConfig.modules["hyperliquid-stake"] = moduleConfig({requiredStakeUsd: 1});
     stubInfoApi({delegated: "500", price: "40.0"});
     await ServiceManager.GetService(ModuleManager).initialize();
     await runTestSession("0x0000000000000000000000000000000000001337");
@@ -259,7 +451,7 @@ describe("Faucet module: hyperliquid-stake", () => {
   }).timeout(5000);
 
   it("Value stake at the spot mid, not the perp mid", async () => {
-    faucetConfig.modules["hyperliquid-stake"] = moduleConfig();
+    faucetConfig.modules["hyperliquid-stake"] = moduleConfig({requiredStakeUsd: 1});
     stubInfoApi({delegated: "500", price: "40.0", perpPrice: "60.0"}); // spot $20,000 vs perp $30,000
     await ServiceManager.GetService(ModuleManager).initialize();
     let testSession = await runTestSession();
@@ -268,7 +460,7 @@ describe("Faucet module: hyperliquid-stake", () => {
   }).timeout(5000);
 
   it("Fall back to the perp mid when spot metadata is unavailable", async () => {
-    faucetConfig.modules["hyperliquid-stake"] = moduleConfig();
+    faucetConfig.modules["hyperliquid-stake"] = moduleConfig({requiredStakeUsd: 1});
     stubInfoApi({delegated: "500", price: "40.0", noSpotMeta: true});
     await ServiceManager.GetService(ModuleManager).initialize();
     let testSession = await runTestSession();
@@ -466,19 +658,27 @@ describe("Faucet module: hyperliquid-stake", () => {
     faucetConfig.modules["hyperliquid-stake"] = moduleConfig();
     stubInfoApi({delegated: "500", price: "40.0"});
     await ServiceManager.GetService(ModuleManager).initialize();
-    let testSession = await runTestSession("0x0000000000000000000000000000000000001337");
+    keepNextSessionRunning();
+    let testSession = await runTestSession(ownershipAccount.address, "running");
     let module = ServiceManager.GetService(ModuleManager).getModule<HyperliquidStakeModule>("hyperliquid-stake");
+    const unverified = await (module as any).processRefreshStakeInfo(
+      {method: "POST"},
+      {query: {session: testSession.getSessionId()}},
+    );
+    expect(unverified.code).to.equal("OWNERSHIP_REQUIRED", "unverified session could refresh stake");
+    const verification = await verifySessionOwnership(module, testSession);
+    expect(verification.verified).to.equal(true, "test wallet was not verified");
     let sessionStub = sinon.stub(ServiceManager.GetService(SessionManager), "getSession").returns(testSession);
     try {
       let now = Math.floor(new Date().getTime() / 1000);
-      // session start stamped hlstake.refresh, so the first refresh is in cooldown
-      let rsp1 = await (module as any).processRefreshStakeInfo({method: "GET"}, {query: {session: "test"}});
-      expect(rsp1.code).to.equal("REFRESH_COOLDOWN", "no cooldown right after session start");
-      expect(rsp1.cooldown > now).to.equal(true, "cooldown is not an absolute epoch after session start");
+      // ownership verification stamped hlstake.refresh, so the first refresh is in cooldown
+      let rsp1 = await (module as any).processRefreshStakeInfo({method: "POST"}, {query: {session: "test"}});
+      expect(rsp1.code).to.equal("REFRESH_COOLDOWN", "no cooldown right after ownership verification");
+      expect(rsp1.cooldown > now).to.equal(true, "cooldown is not an absolute epoch after ownership verification");
       // session cooldown expired: refresh performs a live lookup and restamps
       testSession.setSessionData("hlstake.refresh", now - 400);
       let fetchCount = globalStubs["fetch"].callCount;
-      let rsp2 = await (module as any).processRefreshStakeInfo({method: "GET"}, {query: {session: "test"}});
+      let rsp2 = await (module as any).processRefreshStakeInfo({method: "POST"}, {query: {session: "test"}});
       expect(rsp2.code).to.equal(undefined, "refresh after cooldown was rejected");
       expect(globalStubs["fetch"].callCount).to.equal(fetchCount + 1, "refresh did not perform a live lookup");
       expect(rsp2.stakeInfo?.stakedUsd).to.equal(20000, "unexpected refreshed stake info");
@@ -487,11 +687,11 @@ describe("Faucet module: hyperliquid-stake", () => {
       // the global per-address cooldown (stamped by the forced refresh) outlasts a
       // reset session cooldown: max() clamp keeps the refresh rejected
       testSession.setSessionData("hlstake.refresh", now - 400);
-      let rsp3 = await (module as any).processRefreshStakeInfo({method: "GET"}, {query: {session: "test"}});
+      let rsp3 = await (module as any).processRefreshStakeInfo({method: "POST"}, {query: {session: "test"}});
       expect(rsp3.code).to.equal("REFRESH_COOLDOWN", "per-address cooldown not clamped into session refresh");
       // no session -> INVALID_SESSION
       sessionStub.returns(null);
-      let rsp4 = await (module as any).processRefreshStakeInfo({method: "GET"}, {query: {session: "test"}});
+      let rsp4 = await (module as any).processRefreshStakeInfo({method: "POST"}, {query: {session: "test"}});
       expect(rsp4.code).to.equal("INVALID_SESSION", "missing session not rejected");
     } finally {
       sessionStub.restore();
@@ -523,7 +723,7 @@ describe("Faucet module: hyperliquid-stake", () => {
     expect(resolver.getInflightCount()).to.equal(0, "in-flight slot not released after lookup settled");
   }).timeout(5000);
 
-  it("Share the live lookup budget between guests and session admission", async () => {
+  it("Share the live lookup budget between guests and verified stake checks", async () => {
     faucetConfig.modules["hyperliquid-stake"] = moduleConfig({guestLookupRateLimit: 1});
     stubInfoApi({delegated: "500", price: "40.0"});
     await ServiceManager.GetService(ModuleManager).initialize();
@@ -535,19 +735,26 @@ describe("Faucet module: hyperliquid-stake", () => {
     expect(guestResponse.stakeInfo?.stakedUsd).to.equal(20000, "guest lookup failed");
     let fetchCount = globalStubs["fetch"].callCount;
 
-    let session = await runTestSession("0x0000000000000000000000000000000000005002");
-    expect(globalStubs["fetch"].callCount).to.equal(fetchCount, "session admission bypassed the shared IP budget");
-    expect(session.getSessionData("hlstake.data")?.error).to.equal("Stake lookup unavailable", "rate-limited admission did not use the configured fail-open policy");
-    expect(session.getDropAmount()).to.equal(100n, "rate-limited admission received a stake boost");
+    keepNextSessionRunning();
+    let session = await runTestSession(ownershipAccount.address, "running");
+    const verification = await verifySessionOwnership(module, session);
+    expect(globalStubs["fetch"].callCount).to.equal(fetchCount, "verified stake check bypassed the shared IP budget");
+    expect(verification.verified).to.equal(true, "valid ownership proof was discarded with the stake lookup");
+    expect(verification.code).to.equal("STAKE_CHECK_RATE_LIMITED", "rate-limited stake check returned the wrong state");
+    expect(verification.boost?.factor).to.equal(1, "rate-limited verification received a stake boost");
   }).timeout(5000);
 
   it("Reject non-finite stake values from the info api", async () => {
     faucetConfig.modules["hyperliquid-stake"] = moduleConfig();
     stubInfoApi({delegated: "Infinity", price: "40.0"});
     await ServiceManager.GetService(ModuleManager).initialize();
-    let session = await runTestSession();
-    expect(session.getSessionData("hlstake.data")?.error).to.equal("Stake lookup unavailable", "non-finite stake value was accepted");
-    expect(session.getDropAmount()).to.equal(100n, "non-finite stake value affected the reward");
+    keepNextSessionRunning();
+    let session = await runTestSession(ownershipAccount.address, "running");
+    const module = ServiceManager.GetService(ModuleManager).getModule<HyperliquidStakeModule>("hyperliquid-stake");
+    const verification = await verifySessionOwnership(module, session);
+    expect(verification.verified).to.equal(true, "ownership proof failed with the stake lookup");
+    expect(verification.code).to.equal("STAKE_CHECK_FAILED", "non-finite stake value was accepted");
+    expect(verification.boost?.factor).to.equal(1, "non-finite stake value affected the reward");
   }).timeout(5000);
 
   it("Abort timed out info api requests", async () => {
@@ -560,13 +767,11 @@ describe("Faucet module: hyperliquid-stake", () => {
       }, {once: true});
     }));
     await ServiceManager.GetService(ModuleManager).initialize();
-    let error;
-    try {
-      await runTestSession();
-    } catch(ex) {
-      error = ex;
-    }
-    expect(error?.getCode()).to.equal("STAKE_CHECK_FAILED", "timed out stake request did not fail under failOnApiError");
+    keepNextSessionRunning();
+    const session = await runTestSession(ownershipAccount.address, "running");
+    const module = ServiceManager.GetService(ModuleManager).getModule<HyperliquidStakeModule>("hyperliquid-stake");
+    const verification = await verifySessionOwnership(module, session);
+    expect(verification.code).to.equal("STAKE_CHECK_FAILED", "timed out stake request did not fail closed for the boost");
     expect(abortedRequests).to.be.greaterThan(0, "request timeout did not abort the underlying fetch");
   }).timeout(5000);
 

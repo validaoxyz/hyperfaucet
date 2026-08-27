@@ -8,12 +8,20 @@ import { defaultConfig, IHyperliquidStakeConfig } from './HyperliquidStakeConfig
 import { FaucetSession, FaucetSessionStatus } from '../../session/FaucetSession.js';
 import { ISessionRewardFactor } from '../../session/SessionRewardFactor.js';
 import { FaucetWebApi, IFaucetApiUrl } from '../../webserv/FaucetWebApi.js';
+import { FaucetHttpResponse } from '../../webserv/FaucetHttpServer.js';
 import { SessionManager } from '../../session/SessionManager.js';
+import { faucetConfig } from '../../config/FaucetConfig.js';
 import {
   HyperliquidStakeLookupInvalidatedError,
   HyperliquidStakeResolver,
+  IHyperliquidStakeBoost,
   IHyperliquidStakeInfo,
 } from './HyperliquidStakeResolver.js';
+import {
+  IStakeOwnershipMarker,
+  StakeOwnershipChallengeStore,
+  recoverStakeOwnershipSigner,
+} from './HyperliquidStakeOwnership.js';
 
 interface ILookupCounter {
   windowStart: number;
@@ -22,12 +30,24 @@ interface ILookupCounter {
 
 const LOOKUP_WINDOW_SECONDS = 60;
 const MAX_LOOKUP_COUNTERS = 10000;
+const OWNERSHIP_CHALLENGE_TTL_SECONDS = 300;
+const OWNERSHIP_API_BODY_LIMIT = 2048;
+
+type JsonObject = {[key: string]: unknown};
+
+interface IStakeSessionResponse {
+  address: string;
+  stakeInfo: IHyperliquidStakeInfo | null;
+  boost: IHyperliquidStakeBoost;
+  verified: boolean;
+}
 
 export class HyperliquidStakeModule extends BaseModule<IHyperliquidStakeConfig> {
   protected readonly moduleDefaultConfig = defaultConfig;
 
   private stakeResolver?: HyperliquidStakeResolver;
   private lookupCounters = new Map<string, ILookupCounter>();
+  private ownershipChallenges = new StakeOwnershipChallengeStore();
 
   protected override async startModule(): Promise<void> {
     this.validateConfig();
@@ -63,12 +83,25 @@ export class HyperliquidStakeModule extends BaseModule<IHyperliquidStakeConfig> 
       "refreshStakeInfo",
       (req: IncomingMessage, url: IFaucetApiUrl, body: Buffer) => this.processRefreshStakeInfo(req, url, body)
     );
+    ServiceManager.GetService(FaucetWebApi).registerApiEndpoint(
+      "getStakeChallenge",
+      (req: IncomingMessage, url: IFaucetApiUrl, body: Buffer) => this.processGetStakeChallenge(req, url, body),
+      {maxBodySize: OWNERSHIP_API_BODY_LIMIT},
+    );
+    ServiceManager.GetService(FaucetWebApi).registerApiEndpoint(
+      "verifyStakeOwnership",
+      (req: IncomingMessage, url: IFaucetApiUrl, body: Buffer) => this.processVerifyStakeOwnership(req, url, body),
+      {maxBodySize: OWNERSHIP_API_BODY_LIMIT},
+    );
   }
 
   protected override async stopModule(): Promise<void> {
     this.lookupCounters.clear();
+    this.ownershipChallenges.clear();
     ServiceManager.GetService(FaucetWebApi).removeApiEndpoint("getStakeInfo");
     ServiceManager.GetService(FaucetWebApi).removeApiEndpoint("refreshStakeInfo");
+    ServiceManager.GetService(FaucetWebApi).removeApiEndpoint("getStakeChallenge");
+    ServiceManager.GetService(FaucetWebApi).removeApiEndpoint("verifyStakeOwnership");
     await this.stakeResolver?.stop();
     this.stakeResolver = undefined;
   }
@@ -76,6 +109,7 @@ export class HyperliquidStakeModule extends BaseModule<IHyperliquidStakeConfig> 
   protected override async onConfigReload(): Promise<void> {
     this.validateConfig();
     this.lookupCounters.clear();
+    this.ownershipChallenges.clear();
     if(this.stakeResolver)
       await this.stakeResolver.reload();
   }
@@ -125,6 +159,11 @@ export class HyperliquidStakeModule extends BaseModule<IHyperliquidStakeConfig> 
   private async processSessionStart(session: FaucetSession): Promise<void> {
     if(session.getSessionData<Array<string>>("skip.modules", []).indexOf(this.moduleName) !== -1)
       return;
+    if(this.moduleConfig.requiredStakeUsd <= 0) {
+      session.setSessionData("hlstake.refresh", 0);
+      session.setSessionData("hlstake.data", null);
+      return;
+    }
     let targetAddr = session.getTargetAddr();
     let stakeInfo: IHyperliquidStakeInfo;
     let cachedStakeInfo = this.stakeResolver.getFreshCachedStakeInfo(targetAddr);
@@ -185,17 +224,13 @@ export class HyperliquidStakeModule extends BaseModule<IHyperliquidStakeConfig> 
       return;
     if(session.getSessionStatus() !== FaucetSessionStatus.RUNNING)
       return;
-    let stakeInfo: IHyperliquidStakeInfo = session.getSessionData("hlstake.data");
-    moduleState[this.moduleName] = {
-      stakeInfo: stakeInfo || null,
-      boost: this.stakeResolver.getStakeBoost(
-        stakeInfo && !stakeInfo.error && this.stakeResolver.isStakeInfoFresh(stakeInfo) ? stakeInfo : null,
-      ),
-    };
+    moduleState[this.moduleName] = this.getSessionStakeResponse(session);
   }
 
   private processSessionRewardFactor(session: FaucetSession, rewardFactors: ISessionRewardFactor[]): void {
     if(session.getSessionData<Array<string>>("skip.modules", []).indexOf(this.moduleName) !== -1)
+      return;
+    if(!this.isSessionOwnershipVerified(session))
       return;
     let stakeInfo: IHyperliquidStakeInfo = session.getSessionData("hlstake.data");
     if(!stakeInfo || stakeInfo.error || !this.stakeResolver.isStakeInfoFresh(stakeInfo))
@@ -209,12 +244,228 @@ export class HyperliquidStakeModule extends BaseModule<IHyperliquidStakeConfig> 
     }
   }
 
+  private isSessionOwnershipVerified(session: FaucetSession): boolean {
+    const ownership = session.getSessionData<IStakeOwnershipMarker | null>("hlstake.ownership", null);
+    return ownership?.state === "active" && ownership.address === session.getTargetAddr().toLowerCase();
+  }
+
+  private getSessionStakeResponse(session: FaucetSession): IStakeSessionResponse {
+    const stakeInfo = session.getSessionData<IHyperliquidStakeInfo | null>("hlstake.data", null);
+    const freshStakeInfo = stakeInfo && !stakeInfo.error && this.stakeResolver.isStakeInfoFresh(stakeInfo)
+      ? stakeInfo
+      : null;
+    const verified = this.isSessionOwnershipVerified(session);
+    const availableBoost = this.stakeResolver.getStakeBoost(freshStakeInfo);
+    return {
+      address: session.getTargetAddr().toLowerCase(),
+      stakeInfo: stakeInfo || null,
+      boost: verified ? availableBoost : {...availableBoost, factor: 1},
+      verified,
+    };
+  }
+
+  private async processGetStakeChallenge(req: IncomingMessage, url: IFaucetApiUrl, body: Buffer): Promise<any> {
+    const methodError = this.requirePost(req);
+    if(methodError)
+      return methodError;
+
+    const request = this.parseJsonObject(body);
+    const sessionId = this.readBoundedString(request, "session", 128);
+    const session = this.getRunningSession(sessionId);
+    if(!session)
+      return this.getInvalidSessionResponse();
+    if(session.getSessionData<Array<string>>("skip.modules", []).indexOf(this.moduleName) !== -1)
+      return {code: "BOOST_UNAVAILABLE", error: "Stake boosts are not available for this session."};
+    if(this.isSessionOwnershipVerified(session))
+      return {...this.getSessionStakeResponse(session), cooldown: this.getSessionRefreshAt(session)};
+
+    const now = this.now();
+    const expiresAt = Math.min(
+      now + OWNERSHIP_CHALLENGE_TTL_SECONDS,
+      session.getStartTime() + faucetConfig.sessionTimeout,
+    );
+    if(expiresAt <= now)
+      return this.getInvalidSessionResponse();
+
+    const challenge = this.ownershipChallenges.issue(
+      session.getSessionId(),
+      session.getTargetAddr(),
+      expiresAt,
+    );
+    return {
+      challengeId: challenge.challengeId,
+      message: challenge.message,
+      address: challenge.address,
+      expiresAt: challenge.expiresAt,
+      verified: false,
+    };
+  }
+
+  private async processVerifyStakeOwnership(req: IncomingMessage, url: IFaucetApiUrl, body: Buffer): Promise<any> {
+    const methodError = this.requirePost(req);
+    if(methodError)
+      return methodError;
+
+    const request = this.parseJsonObject(body);
+    const sessionId = this.readBoundedString(request, "session", 128);
+    const challengeId = this.readMatchingString(request, "challengeId", /^[0-9a-f]{64}$/i);
+    const signature = this.readMatchingString(request, "signature", /^0x[0-9a-f]{130}$/i);
+    if(!sessionId || !challengeId || !signature)
+      return {code: "INVALID_REQUEST", error: "Invalid wallet verification request."};
+
+    const session = this.getRunningSession(sessionId);
+    if(!session)
+      return this.getInvalidSessionResponse();
+    if(this.isSessionOwnershipVerified(session))
+      return {...this.getSessionStakeResponse(session), cooldown: this.getSessionRefreshAt(session)};
+
+    const ownershipClaim = this.ownershipChallenges.claim(sessionId, challengeId, this.now());
+    if(ownershipClaim.kind === "missing")
+      return {code: "CHALLENGE_NOT_FOUND", error: "Wallet verification expired. Try again."};
+    if(ownershipClaim.kind === "expired")
+      return {code: "CHALLENGE_EXPIRED", error: "Wallet verification expired. Try again."};
+
+    const challenge = ownershipClaim.challenge;
+    const targetAddress = session.getTargetAddr().toLowerCase();
+    if(challenge.sessionId !== session.getSessionId() || challenge.address !== targetAddress)
+      return {code: "CHALLENGE_MISMATCH", error: "Wallet verification does not match this session."};
+
+    const signer = recoverStakeOwnershipSigner(challenge.message, signature);
+    if(!signer)
+      return {code: "INVALID_SIGNATURE", error: "The wallet signature is invalid."};
+    if(signer !== targetAddress)
+      return {code: "SIGNER_MISMATCH", error: "The signature came from a different wallet."};
+
+    let stakeInfo: IHyperliquidStakeInfo | null = null;
+    let stakeError: {code: string, error: string} | null = null;
+    const cachedStakeInfo = this.stakeResolver.getFreshCachedStakeInfo(targetAddress);
+    if(cachedStakeInfo) {
+      stakeInfo = cachedStakeInfo;
+    }
+    else if(!this.consumeLiveLookupBudget(session.getRemoteIP())) {
+      stakeError = {
+        code: "STAKE_CHECK_RATE_LIMITED",
+        error: "Stake lookup is rate limited. Try again shortly.",
+      };
+    }
+    else {
+      try {
+        stakeInfo = await this.stakeResolver.getStakeInfo(targetAddress);
+      } catch(ex) {
+        this.logLookupFailure(targetAddress, ex);
+        stakeError = {
+          code: "STAKE_CHECK_FAILED",
+          error: "Stake lookup is temporarily unavailable.",
+        };
+      }
+    }
+
+    try {
+      const response = await ServiceManager.GetService(SessionManager).runRewardOperation(async () => {
+        if(session.getSessionStatus() !== FaucetSessionStatus.RUNNING || session.getTargetAddr().toLowerCase() !== challenge.address)
+          return this.getInvalidSessionResponse();
+        if(this.now() >= challenge.expiresAt)
+          return {code: "CHALLENGE_EXPIRED", error: "Wallet verification expired. Try again."};
+
+        const marker: IStakeOwnershipMarker = {
+          state: "pending",
+          challengeId: challenge.challengeId,
+          address: challenge.address,
+          verifiedAt: this.now(),
+        };
+        session.setSessionData("hlstake.ownership", marker);
+        session.setSessionData("hlstake.data", stakeInfo);
+        session.setSessionData("hlstake.refresh", stakeInfo ? this.now() : 0);
+        await session.saveSession();
+
+        session.setSessionData("hlstake.ownership", {...marker, state: "active"});
+        try {
+          await session.saveSession();
+        } catch(ex) {
+          session.setSessionData("hlstake.ownership", marker);
+          try {
+            await session.saveSession();
+          } catch(rollbackError) {
+            // The in-memory marker remains pending, which keeps the reward gate closed.
+          }
+          throw ex;
+        }
+
+        return {
+          ...this.getSessionStakeResponse(session),
+          cooldown: stakeInfo ? this.getSessionRefreshAt(session) : 0,
+        };
+      });
+      if(stakeError && "verified" in response && response.verified === true)
+        return {...response, ...stakeError};
+      return response;
+    } catch(ex) {
+      this.logOwnershipPersistenceFailure(session, ex);
+      return {code: "OWNERSHIP_SAVE_FAILED", error: "Could not save wallet verification. Try again."};
+    }
+  }
+
+  private requirePost(req: IncomingMessage): FaucetHttpResponse | null {
+    return req.method === "POST"
+      ? null
+      : new FaucetHttpResponse(405, "Method Not Allowed", null, {"Allow": "POST"});
+  }
+
+  private parseJsonObject(body: Buffer): JsonObject | null {
+    try {
+      const parsed: unknown = JSON.parse((body || Buffer.alloc(0)).toString("utf8"));
+      return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+        ? parsed as JsonObject
+        : null;
+    } catch(ex) {
+      return null;
+    }
+  }
+
+  private readBoundedString(request: JsonObject | null, key: string, maxLength: number): string | null {
+    const value = request?.[key];
+    return typeof value === "string" && value.length > 0 && value.length <= maxLength ? value : null;
+  }
+
+  private readMatchingString(request: JsonObject | null, key: string, pattern: RegExp): string | null {
+    const value = request?.[key];
+    return typeof value === "string" && pattern.test(value) ? value : null;
+  }
+
+  private getRunningSession(sessionId: string | null): FaucetSession | null {
+    if(!sessionId)
+      return null;
+    return ServiceManager.GetService(SessionManager).getSession(sessionId, [FaucetSessionStatus.RUNNING]);
+  }
+
+  private getInvalidSessionResponse(): {code: string, error: string} {
+    return {code: "INVALID_SESSION", error: "Session not found"};
+  }
+
+  private getSessionRefreshAt(session: FaucetSession): number {
+    const lastRefresh = session.getSessionData<number>("hlstake.refresh", 0);
+    return lastRefresh > 0 ? lastRefresh + this.moduleConfig.refreshCooldown : 0;
+  }
+
+  private now(): number {
+    return Math.floor(Date.now() / 1000);
+  }
+
+  private logOwnershipPersistenceFailure(session: FaucetSession, cause: unknown): void {
+    let detail = cause instanceof Error ? cause.message : String(cause);
+    detail = detail.replace(/[\r\n\t]+/g, " ").slice(0, 256) || "unknown error";
+    ServiceManager.GetService(FaucetProcess).emitLog(
+      FaucetLogLevel.ERROR,
+      "Could not persist stake ownership for session " + session.getSessionId() + ": " + detail,
+    );
+  }
+
   private async processGetStakeInfo(req: IncomingMessage, url: IFaucetApiUrl, body: Buffer): Promise<any> {
     let sessionId = url.query['session'] as string;
     let stakeInfo: IHyperliquidStakeInfo;
+    let session: FaucetSession;
 
     if(sessionId) {
-      let session: FaucetSession;
       if(!(session = ServiceManager.GetService(SessionManager).getSession(sessionId, [FaucetSessionStatus.RUNNING]))) {
         return {
           code: "INVALID_SESSION",
@@ -254,10 +505,8 @@ export class HyperliquidStakeModule extends BaseModule<IHyperliquidStakeConfig> 
     }
 
     return {
-      stakeInfo: stakeInfo || null,
-      boost: this.stakeResolver.getStakeBoost(
-        stakeInfo && !stakeInfo.error && this.stakeResolver.isStakeInfoFresh(stakeInfo) ? stakeInfo : null,
-      ),
+      ...this.getSessionStakeResponse(session),
+      cooldown: this.getSessionRefreshAt(session),
     };
   }
 
@@ -293,12 +542,21 @@ export class HyperliquidStakeModule extends BaseModule<IHyperliquidStakeConfig> 
   }
 
   private async processRefreshStakeInfo(req: IncomingMessage, url: IFaucetApiUrl, body: Buffer): Promise<any> {
+    if(req.method !== "POST")
+      return new FaucetHttpResponse(405, "Method Not Allowed", null, {"Allow": "POST"});
+
     let sessionId = url.query['session'] as string;
     let session: FaucetSession;
     if(!sessionId || !(session = ServiceManager.GetService(SessionManager).getSession(sessionId, [FaucetSessionStatus.RUNNING]))) {
       return {
         code: "INVALID_SESSION",
         error: "Session not found"
+      };
+    }
+    if(!this.isSessionOwnershipVerified(session)) {
+      return {
+        code: "OWNERSHIP_REQUIRED",
+        error: "Verify wallet ownership before refreshing stake.",
       };
     }
 
@@ -336,8 +594,7 @@ export class HyperliquidStakeModule extends BaseModule<IHyperliquidStakeConfig> 
     session.setSessionData("hlstake.data", stakeInfo);
 
     return {
-      stakeInfo: stakeInfo,
-      boost: this.stakeResolver.getStakeBoost(stakeInfo.error ? null : stakeInfo),
+      ...this.getSessionStakeResponse(session),
       cooldown: now + this.moduleConfig.refreshCooldown,
     };
   }

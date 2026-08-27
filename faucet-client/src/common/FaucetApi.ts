@@ -3,6 +3,7 @@ import { IPassportInfo } from "../types/PassportInfo";
 import { IFaucetConfig } from "./FaucetConfig";
 import { IFaucetSessionInfo, IFaucetSessionStatus } from "./FaucetSession";
 import { FaucetTime } from "./FaucetTime";
+import { IStakeChallengeResponse, IStakeInfoResponse } from "../types/StakeInfo";
 
 type ApiQueryArgs = {[arg: string]: string | number | undefined};
 
@@ -163,8 +164,8 @@ export class FaucetApi {
     }, json);
   }
 
-  public getStakeInfo(sessionId: string, address: string, refresh?: boolean): Promise<any> {
-    return this.apiGet<any>("/getStakeInfo", sessionId ? {
+  public getStakeInfo(sessionId: string, address: string, refresh?: boolean): Promise<IStakeInfoResponse> {
+    return this.apiGet<IStakeInfoResponse>("/getStakeInfo", sessionId ? {
       session: sessionId,
     } : {
       address: address,
@@ -172,9 +173,27 @@ export class FaucetApi {
     });
   }
 
-  public refreshStakeInfo(sessionId: string): Promise<any> {
-    return this.apiGet<any>("/refreshStakeInfo", {
+  public refreshStakeInfo(sessionId: string): Promise<IStakeInfoResponse> {
+    return this.apiPost<IStakeInfoResponse>("/refreshStakeInfo", {
       session: sessionId,
+    }, {});
+  }
+
+  public getStakeChallenge(sessionId: string): Promise<IStakeChallengeResponse> {
+    return this.apiPost<IStakeChallengeResponse>("/getStakeChallenge", undefined, {
+      session: sessionId,
+    });
+  }
+
+  public verifyStakeOwnership(
+    sessionId: string,
+    challengeId: string,
+    signature: string,
+  ): Promise<IStakeInfoResponse> {
+    return this.apiPost<IStakeInfoResponse>("/verifyStakeOwnership", undefined, {
+      session: sessionId,
+      challengeId,
+      signature,
     });
   }
 
