@@ -37,7 +37,7 @@ faucetDonationAddress: "0xc15e03058c1459431494ef34caee43cCc0E597E9"
 faucetHomeHtml: |
   <div class='pow-info'>
     <h5>About</h5>
-    A proof-of-work faucet for the HyperEVM testnet.
+    A proof-of-work faucet for HyperEVM testnet.
     Mining in your browser rate-limits requests, so there is testnet HYPE left
     for everyone.
   </div>
