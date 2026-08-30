@@ -7,7 +7,7 @@ const DefaultInfoSections = (): React.ReactElement => (
   <div className="pow-home-container">
     <div className="pow-info">
       <h5>About</h5>
-      <p>A proof-of-work faucet for the HyperEVM testnet (chain <span className="mono">998</span>). Mining in your browser rate-limits requests, so there is testnet HYPE left for everyone.</p>
+      <p>A proof-of-work faucet for the HyperEVM testnet. Mining in your browser rate-limits requests, so there is testnet HYPE left for everyone.</p>
     </div>
     <div className="pow-info">
       <h5>How it works</h5>
