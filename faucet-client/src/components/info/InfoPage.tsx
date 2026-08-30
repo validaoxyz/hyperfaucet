@@ -27,7 +27,7 @@ export const InfoContent = (): React.ReactElement => {
       {faucetConfig.faucetDonation || faucetConfig.faucetWallet ?
         <div className='pow-info'>
           <h5>Support</h5>
-          <p>If you have any spare testnet HYPE, feel free to donate here to keep the faucet running:</p>
+          <p>If you have any spare testnet HYPE, feel free to donate here to help keep the faucet full:</p>
           <AddressChip address={faucetConfig.faucetDonation || faucetConfig.faucetWallet} />
         </div>
       : null}
