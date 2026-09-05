@@ -20,7 +20,7 @@
   "license": "AGPL-3.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/validaoxyz/hyperfaucet-public.git"
+    "url": "git+https://github.com/validaoxyz/hyperfaucet.git"
   },
   "overrides": {
     "fast-uri": "^3.1.5",
