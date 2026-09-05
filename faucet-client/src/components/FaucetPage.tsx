@@ -316,7 +316,8 @@ export class FaucetPage extends React.PureComponent<IFaucetPageProps, IFaucetPag
                 <span>by <a href="https://validao.xyz/#tools" target="_blank" rel="noopener">ValiDAO</a></span>
                 <Link to="/info">Information</Link>
                 <a href="https://github.com/validaoxyz/hyperfaucet-public" target="_blank" rel="noreferrer">Fork me</a>
-                <a href="https://hyperpools.dev" target="_blank" rel="noreferrer">Hyperpools</a>
+                <a href="https://hyperpools.dev" target="_blank" rel="noreferrer">HyperPools</a>
+                <a href="https://testnet.hyperevm-explorer.xyz" target="_blank" rel="noreferrer">Explorer</a>
               </div>
             </Router>
           </FaucetPageContext.Provider>

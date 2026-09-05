@@ -31,14 +31,11 @@
 			-X-Powered-By
 			Strict-Transport-Security "max-age=31536000; includeSubDomains"
 			Cache-Control "private, no-store"
-			+Vary "Authorization"
 			X-Content-Type-Options "nosniff"
 			X-Frame-Options "DENY"
 			Referrer-Policy "no-referrer"
 			Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
 		}
-
-		import /run/secrets/caddy_basic_auth
 
 		reverse_proxy app:8082 {
 			header_up -Authorization
@@ -54,7 +51,6 @@
 	handle_errors {
 		header {
 			Cache-Control "private, no-store"
-			+Vary "Authorization"
 		}
 		respond "" {http.error.status_code}
 	}

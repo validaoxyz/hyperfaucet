@@ -362,20 +362,18 @@ test("Docker Compose resolves the exact production network and publication contr
   }]);
 });
 
-test("the independent edge enforces AOP and Basic Auth before stripping credentials", async () => {
+test("the independent edge enforces AOP and strips credentials", async () => {
   const caddy = await readFile(path.join(ROOT, "ops", "Caddyfile"), "utf8");
   assert.match(caddy, /\{\$HYPERFAUCET_HOST\}:443/);
   assert.match(caddy, /tls \/run\/secrets\/cloudflare_origin_cert \/run\/secrets\/cloudflare_origin_key/);
   assert.match(caddy, /client_auth \{\s*mode require_and_verify\s*trust_pool file \/run\/secrets\/cloudflare_aop_ca\s*\}/);
-  const auth = caddy.indexOf("import /run/secrets/caddy_basic_auth");
   const proxy = caddy.indexOf("reverse_proxy app:8082");
-  assert.ok(auth >= 0 && proxy > auth);
+  assert.ok(proxy > caddy.indexOf("client_auth"));
   assert.match(caddy, /header_up -Authorization/);
   assert.match(caddy, /header_up -Proxy-Authorization/);
   assert.match(caddy, /header_up X-Forwarded-For \{client_ip\}/);
   assert.match(caddy, /Cache-Control "private, no-store"/);
-  assert.match(caddy, /\+Vary "Authorization"/);
-  assert.doesNotMatch(caddy, /plaintext-fixture-password|basic_auth\s*\{/);
+  assert.doesNotMatch(caddy, /plaintext-fixture-password|caddy_basic_auth|basic_auth\s*\{|Vary "Authorization"/i);
 });
 
 test("the container entrypoint has a direct app role and rejects unknown roles", async () => {

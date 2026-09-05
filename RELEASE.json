@@ -1,7 +1,7 @@
 {
   "exporter": "scripts/export-public.sh",
   "schemaVersion": 1,
-  "sourceCommit": "700d79217a007dbac6d0ea0e1d7b4bf9c3c9e0bb",
-  "sourceDateEpoch": 1788065066,
+  "sourceCommit": "c08c9d382c3be50720700b189844786b9574b789",
+  "sourceDateEpoch": 1788568712,
   "sourceRepository": "validaoxyz/hyperfaucet"
 }
