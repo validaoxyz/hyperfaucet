@@ -1,10 +1,8 @@
 import { TypedEmitter } from 'tiny-typed-emitter';
-import { PoWClient } from "./PoWClient";
-import { IPoWMinerShare, IPoWMinerVerification, IPoWMinerVerificationResult, PoWMiner } from "./PoWMiner";
-import { FaucetTime } from '../common/FaucetTime';
-import { FaucetSession } from '../common/FaucetSession';
-import { getPoWParamsStr } from '../utils/PoWParamsHelper';
-import { IFaucetConfig, IPoWModuleConfig } from '../common/FaucetConfig';
+import type { PoWClient } from "./PoWClient";
+import type { IPoWMinerShare, IPoWMinerVerification, IPoWMinerVerificationResult, PoWMiner } from "./PoWMiner";
+import type { FaucetTime } from '../common/FaucetTime';
+import type { FaucetSession } from '../common/FaucetSession';
 
 export interface IPoWSessionOptions {
   session: FaucetSession;
@@ -77,10 +75,12 @@ export class PoWSession extends TypedEmitter<PoWSessionEvents> {
   }
 
   public submitShare(share: IPoWMinerShare) {
-    if(this.options.client.isReady() && this.shareQueue.length === 0)
-      this._submitShare(share);
-    else
-      this.shareQueue.push(share);
+    // Keep submissions FIFO. The server validates shares asynchronously and
+    // caps the number of pending validations per session. Sending one request
+    // at a time prevents a larger worker pool from overrunning that cap and
+    // preserves the server's strictly increasing nonce requirement.
+    this.shareQueue.push(share);
+    this.processShareQueue();
     this.shareCount++;
   }
 
@@ -89,26 +89,25 @@ export class PoWSession extends TypedEmitter<PoWSessionEvents> {
       return;
     this.shareQueueProcessing = true;
 
-    let queueLoop = () => {
-      let queueLen = this.shareQueue.length;
-      if(!this.options.client.isReady())
-        queueLen = 0;
-      
-      if(queueLen > 0) {
-        this._submitShare(this.shareQueue.shift());
-        queueLen--;
-      }
+    const queueLoop = async () => {
+      while(this.shareQueue.length > 0) {
+        if(!this.options.client.isReady()) {
+          this.shareQueueProcessing = false;
+          return;
+        }
 
-      if(queueLen > 0)
-        setTimeout(() => queueLoop(), 2000);
-      else
-        this.shareQueueProcessing = false;
-    }
-    queueLoop();
+        await this._submitShare(this.shareQueue.shift());
+      }
+      this.shareQueueProcessing = false;
+    };
+    void queueLoop();
   }
 
-  private _submitShare(share: IPoWMinerShare) {
-    this.options.client.sendRequest("foundShare", share).catch((err) => {
+  private async _submitShare(share: IPoWMinerShare) {
+    try {
+      await this.options.client.sendRequest("foundShare", share);
+    }
+    catch(err) {
       if(err.code === "INVALID_SHARE" && err.message === "Invalid share params") {
         this.shareQueue = this.shareQueue.filter((s) => s.params !== share.params);
         this.options.refreshConfig();
@@ -116,7 +115,7 @@ export class PoWSession extends TypedEmitter<PoWSessionEvents> {
       }
 
       this.options.showNotification("error", "Submission error: [" + err.code + "] " + err.message, true);
-    });
+    }
   }
 
   private processVerification(verification: IPoWMinerVerification) {

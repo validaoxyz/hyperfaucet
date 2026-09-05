@@ -198,7 +198,7 @@ export class PoWWorker {
     if(rangeCount === 0)
       return;
     let nonce = this.workNonce++;
-    if(nonce >= this.nonceRanges[0].last) {
+    if(nonce > this.nonceRanges[0].last) {
       this.nonceRanges.splice(0, 1);
       if(rangeCount !== 1) {
         this.workNonce = this.nonceRanges[0].first;
