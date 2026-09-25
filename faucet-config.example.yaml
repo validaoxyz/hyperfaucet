@@ -112,7 +112,7 @@ ethMaxPending: 12
 ethQueueNoFunds: false
 
 # link to transaction explorer with {txid} as placeholder for transaction id or null for no link
-ethTxExplorerLink: "https://app.hyperliquid-testnet.xyz/explorer/tx/{txid}"
+ethTxExplorerLink: "https://testnet.hyperevm-explorer.xyz/tx/{txid}"
 
 # min/max drop amount (max is the default if no module lowers it)
 maxDropAmount: 5000000000000000000 # 5 HYPE
